@@ -1452,7 +1452,7 @@ private:
       assert(extent.is_stable_clean() && !extent.is_placeholder());
       
       if (!extent.primary_ref_list_hook.is_linked()) {
-	contents += extent.get_length();
+	contents += extent.get_loaded_length();
 	intrusive_ptr_add_ref(&extent);
 	lru.push_back(extent);
       }
@@ -1479,8 +1479,8 @@ private:
 
       if (extent.primary_ref_list_hook.is_linked()) {
 	lru.erase(lru.s_iterator_to(extent));
-	assert(contents >= extent.get_length());
-	contents -= extent.get_length();
+	assert(contents >= extent.get_loaded_length());
+	contents -= extent.get_loaded_length();
 	intrusive_ptr_release(&extent);
       }
     }
@@ -1491,10 +1491,19 @@ private:
       if (extent.primary_ref_list_hook.is_linked()) {
 	lru.erase(lru.s_iterator_to(extent));
 	intrusive_ptr_release(&extent);
-	assert(contents >= extent.get_length());
-	contents -= extent.get_length();
+	assert(contents >= extent.get_loaded_length());
+	contents -= extent.get_loaded_length();
       }
       add_to_lru(extent);
+    }
+
+    void maybe_increase_cached_size(
+      CachedExtent &extent,
+      extent_len_t length) {
+      if (extent.primary_ref_list_hook.is_linked()) {
+        contents += length;
+      }
+      trim_to_capacity();
     }
 
     void clear() {
@@ -1701,6 +1710,7 @@ private:
     } else {
       regions = extent->get_unloaded_ranges(offset, length);
     }
+    auto old_length = extent->get_loaded_length();
     return seastar::do_with(regions, [extent, this](auto &read_regions) {
         return read_ertr::parallel_for_each(
           read_regions,
@@ -1727,7 +1737,7 @@ private:
             });
         });
     }).safe_then(
-      [this, extent=std::move(extent), offset, length]() mutable {
+      [this, extent=std::move(extent), offset, length, old_length]() mutable {
         LOG_PREFIX(Cache::read_extent);
         if (likely(extent->state == CachedExtent::extent_state_t::CLEAN_PENDING)) {
           extent->state = CachedExtent::extent_state_t::CLEAN;
@@ -1744,6 +1754,8 @@ private:
           extent->on_clean_read();
         }
 
+        lru.maybe_increase_cached_size(
+          *extent, extent->get_loaded_length() - old_length);
         extent->complete_io();
         SUBDEBUG(seastore_cache, "read extent range {} ~ {} done -- {}",
           offset, length, *extent);
